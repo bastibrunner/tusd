@@ -375,16 +375,14 @@ func (handler *UnroutedHandler) PostFile(w http.ResponseWriter, r *http.Request)
 	}
 
 	if isFinal {
-		concatableUpload := handler.composer.Concater.AsConcatableUpload(upload)
-		if err := concatableUpload.ConcatUploads(ctx, partialUploads); err != nil {
-			handler.sendError(w, r, err)
-			return
+		handler.log("ConcatableReceived", "requestId", getRequestId(r))
+		// Sending response before concat
+		handler.sendResp(w, r, http.StatusCreated)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+			handler.log("ConcatableUploadResponseSent")
 		}
-		info.Offset = size
-
-		if handler.config.NotifyCompleteUploads {
-			handler.CompleteUploads <- newHookEvent(info, r)
-		}
+		go concat(handler, ctx, partialUploads, upload, w, r, info)
 	}
 
 	if containsChunk {
@@ -412,7 +410,9 @@ func (handler *UnroutedHandler) PostFile(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	handler.sendResp(w, r, http.StatusCreated)
+	if !isFinal {
+		handler.sendResp(w, r, http.StatusCreated)
+	}
 }
 
 // HeadFile returns the length and offset for the HEAD request
@@ -476,6 +476,21 @@ func (handler *UnroutedHandler) HeadFile(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Upload-Offset", strconv.FormatInt(info.Offset, 10))
 	handler.sendResp(w, r, http.StatusOK)
+}
+
+func concat(handler *UnroutedHandler, ctx context.Context, partialUploads []Upload, upload Upload, w http.ResponseWriter, r *http.Request, info FileInfo) *UnroutedHandler {
+	concatableUpload := handler.composer.Concater.AsConcatableUpload(upload)
+	if err := concatableUpload.ConcatUploads(ctx, partialUploads); err != nil {
+		handler.sendError(w, r, err)
+		return handler
+	}
+	//	info.Offset = size
+
+	if handler.config.NotifyCompleteUploads {
+		handler.CompleteUploads <- newHookEvent(info, r)
+	}
+	handler.log("ConcatableUploadStartingConcat")
+	return handler
 }
 
 // PatchFile adds a chunk to an upload. This operation is only allowed
